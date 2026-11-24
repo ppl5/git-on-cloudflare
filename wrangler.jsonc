@@ -6,17 +6,7 @@
   "compatibility_flags": [
     "nodejs_als"
   ],
-  "workers_dev": false,
-  "routes": [
-    {
-      "pattern": "git-on-cloudflare.com",
-      "custom_domain": true
-    },
-    {
-      "pattern": "git.limic.dev",
-      "custom_domain": true
-    }
-  ],
+  "workers_dev": true,
   "durable_objects": {
     "bindings": [
       {
