@@ -25,9 +25,9 @@ function describeClaimReason(reason: Exclude<ClaimResult, { ok: true }>["reason"
   }
 }
 
-// Shown only when the sign-in callback could not claim a namespace
-// automatically. The first automatic candidate is prefilled, so most users
-// can simply press the button.
+// Shown whenever the signed-in account has no namespace. The sign-in callback
+// only suggests a name; claiming is always explicit so the user can accept the
+// prefill or pick their own handle.
 export function ClaimNamespaceIsland({ suggestedNamespaceSlug }: ClaimNamespaceIslandProps) {
   const [slug, setSlug] = useState(suggestedNamespaceSlug ?? "");
   const [submitting, setSubmitting] = useState(false);
@@ -39,7 +39,7 @@ export function ClaimNamespaceIsland({ suggestedNamespaceSlug }: ClaimNamespaceI
       <EmptyState
         icon={<ShieldCheck className="h-5 w-5 text-zinc-400" aria-hidden="true" />}
         title="Choose your namespace"
-        detail="It becomes your public @handle and owns your repositories."
+        detail="It becomes your public @handle and owns your repositories. Keep the suggestion or change it."
       />
       {error ? <ErrorBanner>{error}</ErrorBanner> : null}
       <form

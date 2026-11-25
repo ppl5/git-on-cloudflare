@@ -14,7 +14,11 @@ import { OIDC_TX_COOKIE_HEADER_NAME, SESSION_COOKIE_HEADER_NAME } from "@/worker
 
 import { fakeProvider } from "./util/oidcFake";
 import { readAppD1Migrations } from "./util/d1Migrations";
-import { oidcTransactionCookieHeader } from "./util/authCookies";
+import {
+  extractSessionToken,
+  oidcTransactionCookieHeader,
+  sessionCookieHeader,
+} from "./util/authCookies";
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, readAppD1Migrations());
@@ -80,6 +84,26 @@ async function callCallback(args: { state: string; cookie?: string; code?: strin
   });
 }
 
+async function accountHtmlFor(token: string): Promise<string> {
+  const res = await workerExports.default.fetch("https://example.com/auth/account", {
+    headers: { Cookie: sessionCookieHeader(token) },
+  });
+  expect(res.status).toBe(200);
+  return await res.text();
+}
+
+async function claimNamespaceForSession(token: string, slug: string): Promise<Response> {
+  return await workerExports.default.fetch("https://example.com/auth/api/namespaces", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: "https://example.com",
+      Cookie: sessionCookieHeader(token),
+    },
+    body: JSON.stringify({ slug }),
+  });
+}
+
 beforeEach(() => {
   preloadProvider();
 });
@@ -90,7 +114,7 @@ afterEach(() => {
 });
 
 describe("/auth/callback", () => {
-  it("creates user, namespace, membership, and session for a fresh sub with valid pref-name", async () => {
+  it("creates the user and a prefilled claim form without claiming a namespace", async () => {
     const sub = "sub-fresh-1";
     const state = "state-fresh-1";
     stubGrantWithClaims({ sub, preferred_username: "fresh-rachel" });
@@ -100,17 +124,46 @@ describe("/auth/callback", () => {
     expect(res.headers.get("location")).toBe("/auth/account");
     const cookies = res.headers.get("set-cookie") ?? "";
     expect(cookies).toContain(`${SESSION_COOKIE_HEADER_NAME}=goc_sess_`);
+    const token = extractSessionToken(cookies);
+    expect(token).toBeTruthy();
     const db = createDb(env.DB);
     const user = await findUserByTesseraSub(db, sub);
     expect(user).toBeDefined();
-    const namespace = await findNamespaceBySlug(db, "fresh-rachel");
-    expect(namespace).toBeDefined();
-    expect(namespace!.createdBy).toBe(user!.id);
-    const namespaces = await listNamespacesForUser(db, user!.id);
-    expect(namespaces.map((row) => row.slug)).toEqual(["fresh-rachel"]);
+    // Sign-in must not claim: the namespace is created only after the user
+    // confirms the form.
+    expect(await findNamespaceBySlug(db, "fresh-rachel")).toBeUndefined();
+    expect(await listNamespacesForUser(db, user!.id)).toEqual([]);
+    const html = await accountHtmlFor(token!);
+    expect(html).toContain("Choose your namespace");
+    expect(html).toContain('value="fresh-rachel"');
   });
 
-  it("suffixes the pref-name when the base slug is taken by another user", async () => {
+  it("claims the prefilled suggestion through the account API", async () => {
+    const sub = "sub-google-email";
+    const state = "state-google-email";
+    stubGrantWithClaims({ sub, email: "pei.li.philip@example.com" });
+    const cookie = await buildTransactionCookie(state, "nonce-google", "verifier-google");
+    const res = await callCallback({ state, cookie });
+    expect(res.status).toBe(302);
+    const token = extractSessionToken(res.headers.get("set-cookie"));
+    expect(token).toBeTruthy();
+    const db = createDb(env.DB);
+    const user = await findUserByTesseraSub(db, sub);
+    expect(user).toBeDefined();
+    expect((await accountHtmlFor(token!)).includes('value="pei-li-philip"')).toBe(true);
+
+    // One explicit confirmation creates the namespace and membership.
+    const claim = await claimNamespaceForSession(token!, "pei-li-philip");
+    expect(claim.status).toBe(201);
+    const namespace = await findNamespaceBySlug(db, "pei-li-philip");
+    expect(namespace?.createdBy).toBe(user!.id);
+    expect((await listNamespacesForUser(db, user!.id)).map((row) => row.slug)).toEqual([
+      "pei-li-philip",
+    ]);
+    expect(await accountHtmlFor(token!)).toContain("@pei-li-philip");
+  });
+
+  it("prefills a suffixed suggestion when the base slug is taken by another user", async () => {
     const occupant = "user-occupant";
     const db = createDb(env.DB);
     // Seed an existing namespace owned by an unrelated user.
@@ -134,18 +187,21 @@ describe("/auth/callback", () => {
     const res = await callCallback({ state, cookie });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/auth/account");
+    const token = extractSessionToken(res.headers.get("set-cookie"));
+    expect(token).toBeTruthy();
     const dbAfter = createDb(env.DB);
     const user = await findUserByTesseraSub(dbAfter, sub);
     expect(user).toBeDefined();
     expect(user!.id).not.toBe(occupant);
-    const namespace = await findNamespaceBySlug(dbAfter, "taken");
-    expect(namespace?.createdBy).toBe(occupant);
-    expect((await listNamespacesForUser(dbAfter, user!.id)).map((row) => row.slug)).toEqual([
-      "taken-2",
-    ]);
+    // The occupied base slug is still owned by the other user, and the new
+    // account gets the first free suffixed name as a suggestion only.
+    expect((await findNamespaceBySlug(dbAfter, "taken"))?.createdBy).toBe(occupant);
+    expect(await findNamespaceBySlug(dbAfter, "taken-2")).toBeUndefined();
+    expect(await listNamespacesForUser(dbAfter, user!.id)).toEqual([]);
+    expect(await accountHtmlFor(token!)).toContain('value="taken-2"');
   });
 
-  it("normalizes a non-slug pref-name instead of dropping the claim", async () => {
+  it("normalizes a non-slug pref-name for the prefilled suggestion", async () => {
     const sub = "sub-invalid-1";
     const state = "state-invalid";
     stubGrantWithClaims({ sub, preferred_username: "Invalid_Slug!" });
@@ -153,65 +209,70 @@ describe("/auth/callback", () => {
     const res = await callCallback({ state, cookie });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/auth/account");
+    const token = extractSessionToken(res.headers.get("set-cookie"));
+    expect(token).toBeTruthy();
     const db = createDb(env.DB);
     const user = await findUserByTesseraSub(db, sub);
     expect(user).toBeDefined();
-    expect((await listNamespacesForUser(db, user!.id)).map((row) => row.slug)).toEqual([
-      "invalid-slug",
-    ]);
+    expect(await listNamespacesForUser(db, user!.id)).toEqual([]);
+    expect(await accountHtmlFor(token!)).toContain('value="invalid-slug"');
   });
 
-  it("claims from the email local-part when the provider omits preferred_username", async () => {
-    const sub = "sub-google-email";
-    const state = "state-google-email";
-    stubGrantWithClaims({ sub, email: "pei.li.philip@example.com" });
-    const cookie = await buildTransactionCookie(state, "nonce-google", "verifier-google");
-    const res = await callCallback({ state, cookie });
-    expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe("/auth/account");
-    const db = createDb(env.DB);
-    const user = await findUserByTesseraSub(db, sub);
-    expect(user).toBeDefined();
-    expect((await listNamespacesForUser(db, user!.id)).map((row) => row.slug)).toEqual([
-      "pei-li-philip",
-    ]);
-  });
-
-  it("retries the claim for an existing user that still has no namespace", async () => {
+  it("offers a suggestion on a later sign-in while the account has no namespace", async () => {
     const sub = "sub-returning";
     const state1 = "state-r1";
     stubGrantWithClaims({ sub });
     const cookie1 = await buildTransactionCookie(state1, "n1", "v1");
-    expect((await callCallback({ state: state1, cookie: cookie1 })).status).toBe(302);
+    const first = await callCallback({ state: state1, cookie: cookie1 });
+    expect(first.status).toBe(302);
+    const firstToken = extractSessionToken(first.headers.get("set-cookie"));
+    expect(firstToken).toBeTruthy();
     const db = createDb(env.DB);
     const user = await findUserByTesseraSub(db, sub);
     expect(user).toBeDefined();
-    expect((await listNamespacesForUser(db, user!.id)).length).toBe(0);
-    // A later sign-in with a usable naming claim must repair the account
-    // without manual D1 edits.
+    expect(await listNamespacesForUser(db, user!.id)).toEqual([]);
+    // Without any naming claim the form is blank.
+    expect(await accountHtmlFor(firstToken!)).not.toContain("suggestedNamespaceSlug");
+
+    // A later sign-in with a usable naming claim repairs the prefill without
+    // manual D1 edits.
     stubGrantWithClaims({ sub, preferred_username: "newslug" });
     const state2 = "state-r2";
     const cookie2 = await buildTransactionCookie(state2, "n2", "v2");
-    const res = await callCallback({ state: state2, cookie: cookie2 });
-    expect(res.status).toBe(302);
-    expect((await listNamespacesForUser(db, user!.id)).map((row) => row.slug)).toEqual(["newslug"]);
+    const second = await callCallback({ state: state2, cookie: cookie2 });
+    expect(second.status).toBe(302);
+    const secondToken = extractSessionToken(second.headers.get("set-cookie"));
+    expect(secondToken).toBeTruthy();
+    expect(await listNamespacesForUser(db, user!.id)).toEqual([]);
+    expect(await accountHtmlFor(secondToken!)).toContain('value="newslug"');
   });
 
-  it("does not claim a second namespace for a user that already has one", async () => {
+  it("does not offer a claim form or second namespace when one already exists", async () => {
     const sub = "sub-settled";
     const state1 = "state-settled-1";
     stubGrantWithClaims({ sub, preferred_username: "settled" });
     const cookie1 = await buildTransactionCookie(state1, "n", "v");
-    expect((await callCallback({ state: state1, cookie: cookie1 })).status).toBe(302);
+    const first = await callCallback({ state: state1, cookie: cookie1 });
+    expect(first.status).toBe(302);
+    const token1 = extractSessionToken(first.headers.get("set-cookie"));
+    expect(token1).toBeTruthy();
+    expect((await claimNamespaceForSession(token1!, "settled")).status).toBe(201);
+
     const db = createDb(env.DB);
     const user = await findUserByTesseraSub(db, sub);
     expect(user).toBeDefined();
     stubGrantWithClaims({ sub, preferred_username: "settled-second" });
     const state2 = "state-settled-2";
     const cookie2 = await buildTransactionCookie(state2, "n", "v");
-    expect((await callCallback({ state: state2, cookie: cookie2 })).status).toBe(302);
+    const second = await callCallback({ state: state2, cookie: cookie2 });
+    expect(second.status).toBe(302);
+    const token2 = extractSessionToken(second.headers.get("set-cookie"));
+    expect(token2).toBeTruthy();
     expect((await listNamespacesForUser(db, user!.id)).map((row) => row.slug)).toEqual(["settled"]);
     expect(await findNamespaceBySlug(db, "settled-second")).toBeUndefined();
+    const html = await accountHtmlFor(token2!);
+    expect(html).toContain("@settled");
+    expect(html).not.toContain('data-island="claim-namespace"');
   });
 
   it("clears the OIDC transaction cookie when runtime config is missing", async () => {
@@ -294,7 +355,7 @@ describe("/auth/callback", () => {
     expect(res.headers.get("location")).toBe("/auth?error=invalid_id_token");
   });
 
-  it("seeds membership for the existing namespace owner on returning sign-in", async () => {
+  it("keeps the existing namespace membership on returning sign-in", async () => {
     const sub = "sub-existing-member";
     const userId = "user-existing-member";
     const namespaceId = "ns-existing-member";
@@ -324,7 +385,7 @@ describe("/auth/callback", () => {
     ]);
   });
 
-  it("creates a fresh namespace claim without creating route-cache entries", async () => {
+  it("does not write namespaces or route-cache entries during sign-in", async () => {
     const slug = "callback-direct";
     const repo = "not-created-by-callback";
     const routeKey = `repo-route:v1:${slug}/${repo}`;
@@ -333,6 +394,8 @@ describe("/auth/callback", () => {
     const cookie = await buildTransactionCookie("state-callback-direct", "n", "v");
     const res = await callCallback({ state: "state-callback-direct", cookie });
     expect(res.status).toBe(302);
+    const db = createDb(env.DB);
+    expect(await findNamespaceBySlug(db, slug)).toBeUndefined();
     await new Promise((resolve) => setTimeout(resolve, 250));
     expect(await env.ROUTES.get(routeKey)).toBeNull();
   });

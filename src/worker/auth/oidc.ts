@@ -308,7 +308,7 @@ export interface VerifiedIdToken {
   preferredUsername?: string;
   // Providers such as Google never emit `preferred_username`. Their ID
   // tokens do carry a verified `email`, which is used only as a namespace
-  // claim candidate (never as identity proof) when no username is present.
+  // suggestion (never as identity proof) when no username is present.
   email?: string;
 }
 
@@ -320,8 +320,8 @@ export type VerifyResult =
 
 // goc trusts any verified `sub` (no operator allowlist; this is a multi-user
 // surface, not an admin tool). `preferred_username` is captured here as a
-// candidate slug; ownership is established through the namespace claim, not
-// through the claim value.
+// namespace suggestion; ownership is established through the explicit
+// namespace claim, not through the claim value.
 export function verifyIdTokenClaims(claims: oidc.IDToken): VerifyResult {
   if (typeof claims.sub !== "string" || claims.sub.length === 0) {
     return { ok: false, reason: "missing_sub" };

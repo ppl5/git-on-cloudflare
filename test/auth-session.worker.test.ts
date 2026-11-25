@@ -75,7 +75,10 @@ describe("session lifecycle", () => {
     });
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain("@session-rachel");
+    // Sign-in issues the cookie and prefills the claim form; the name is not
+    // claimed until the user confirms it.
+    expect(html).toContain("Choose your namespace");
+    expect(html).toContain('value="session-rachel"');
   });
 
   it("/auth/account redirects to /auth when no cookie is present", async () => {

@@ -23,8 +23,9 @@ const SessionPayloadSchema = z.object({
   userId: z.string(),
   createdAt: z.number(),
   expiresAt: z.number(),
-  // Prefill hint for the account page's self-service namespace claim form.
-  // Optional so sessions minted before this field existed keep validating.
+  // Prefill hint for the account page's namespace claim form. Never claimed
+  // automatically; the user confirms or edits it. Optional so sessions minted
+  // before this field existed keep validating.
   suggestedNamespaceSlug: z.string().max(40).optional(),
 });
 

@@ -11,10 +11,9 @@ import { generateNamespaceId, loadViewer } from "@/worker/auth/session";
 import type { AppRouter } from "./hono";
 import { NamespaceClaimRequestSchema } from "./requestSchemas";
 
-// Self-service fallback for accounts whose automatic claim could not run
-// (for example every candidate was already taken). The sign-in callback is
-// still the primary path; this endpoint exists so a dead-end account never
-// needs manual D1 surgery.
+// Explicit namespace claim for signed-in accounts. The sign-in callback only
+// derives a prefilled suggestion; this endpoint creates the namespace and
+// membership when the user confirms or edits the form on `/auth/account`.
 export function registerAuthNamespaceRoutes(router: AppRouter) {
   router.post(`/auth/api/namespaces`, async (c) => {
     const log = c.var.logFor({ service: "NamespaceClaim" });
