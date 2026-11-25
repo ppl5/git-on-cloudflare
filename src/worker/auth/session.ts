@@ -23,6 +23,10 @@ const SessionPayloadSchema = z.object({
   userId: z.string(),
   createdAt: z.number(),
   expiresAt: z.number(),
+  // Prefill hint for the account page's namespace claim form. Never claimed
+  // automatically; the user confirms or edits it. Optional so sessions minted
+  // before this field existed keep validating.
+  suggestedNamespaceSlug: z.string().max(40).optional(),
 });
 
 type SessionPayload = z.infer<typeof SessionPayloadSchema>;
@@ -145,7 +149,8 @@ export async function createSessionForUser(
   env: Env,
   c: AppContext,
   userId: string,
-  now: number = Date.now()
+  now: number = Date.now(),
+  suggestedNamespaceSlug?: string
 ): Promise<{ token: string }> {
   const config = loadSessionConfig(env);
   if (!config.ok) {
@@ -156,6 +161,7 @@ export async function createSessionForUser(
     userId,
     createdAt: now,
     expiresAt: now + SESSION_TTL_MS,
+    suggestedNamespaceSlug,
   });
   setSessionCookie(c, token);
   return { token };
@@ -210,7 +216,13 @@ async function loadViewerUncached(c: AppContext): Promise<Viewer | null> {
   } catch {
     primaryNamespaceSlug = undefined;
   }
-  return { userId: active.user.id, primaryNamespaceSlug };
+  return {
+    userId: active.user.id,
+    primaryNamespaceSlug,
+    suggestedNamespaceSlug: primaryNamespaceSlug
+      ? undefined
+      : active.payload.suggestedNamespaceSlug,
+  };
 }
 
 // Sign-out clears the browser cookie. Because sessions are sealed stateless

@@ -106,6 +106,14 @@ wrangler secret put TESSERA_OIDC_CLIENT_SECRET
 - Git pushes require a PAT with push access; HTTP Basic username must match the namespace slug.
 - Manage repositories and PATs at `/auth/account`.
 
+On sign-in the server derives a namespace suggestion from the ID token's
+`preferred_username` claim, falling back to the email local-part for providers
+such as Google that do not emit `preferred_username`. Nothing is claimed
+silently: `/auth/account` shows the suggestion in an editable form, and one click
+creates the namespace and membership. If the suggested slug is taken, the next
+available numeric-suffixed candidate is prefilled, and the user can always type
+a different name.
+
 > [!TIP]
 > For local `vite dev` testing, you may want to configure Git credentials up front instead of waiting for an interactive prompt. Miniflare currently has a bug where some backend `401 Unauthorized` responses can surface as a `500`, which prevents Git from prompting as it normally would against a deployed Worker.
 >

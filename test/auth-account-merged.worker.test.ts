@@ -69,6 +69,18 @@ async function signIn(sub: string, preferredUsername?: string): Promise<string> 
 describe("merged /auth/account hub", () => {
   it("renders identity, namespaces, repositories, and the tokens island on one page", async () => {
     const token = await signIn("sub-merged-1", "merged-rachel");
+    // Sign-in only prefills the claim form; confirm it so the page has a
+    // namespace to render.
+    const claim = await workerExports.default.fetch("https://example.com/auth/api/namespaces", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://example.com",
+        Cookie: sessionCookieHeader(token),
+      },
+      body: JSON.stringify({ slug: "merged-rachel" }),
+    });
+    expect(claim.status).toBe(201);
     const res = await workerExports.default.fetch("https://example.com/auth/account", {
       headers: { Cookie: sessionCookieHeader(token) },
     });

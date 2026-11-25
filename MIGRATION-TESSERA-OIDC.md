@@ -4,7 +4,7 @@ Operator runbook for upgrading an existing git-on-cloudflare deployment from leg
 
 This guide is primarily for people running their own fork or clone. The upstream deployment has already completed this migration.
 
-The implementation and variable names say `tessera` because upstream uses tessera as its OIDC provider. You can use another OIDC provider if it supports standard OIDC discovery, authorization code + PKCE, confidential clients, signed ID tokens, and a stable opaque `sub` claim. For automatic namespace claim/import, the provider should also emit a slug-safe `preferred_username` claim; otherwise, you must seed namespaces/memberships/repositories in D1 manually.
+The implementation and variable names say `tessera` because upstream uses tessera as its OIDC provider. You can use another OIDC provider if it supports standard OIDC discovery, authorization code + PKCE, confidential clients, signed ID tokens, and a stable opaque `sub` claim. For a namespace suggestion, the provider should also emit a slug-safe `preferred_username` claim. Providers that only emit `email` (such as Google) fall back to the email local-part. Either way, the user confirms or edits the suggestion on `/auth/account`; no manual D1 seeding is required.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ The implementation and variable names say `tessera` because upstream uses tesser
 
 4. **Provider claims are suitable.**
    - `sub` must be stable and opaque. git-on-cloudflare stores it in `users.tessera_sub` even if the provider is not tessera.
-   - `preferred_username` should be a lowercase ASCII slug or at least normalize to one. It is used only as a namespace claim candidate, not as identity proof.
+   - `preferred_username` should be a lowercase ASCII slug or at least normalize to one. It is used only as a namespace suggestion, not as identity proof.
 
 5. **Cloudflare bindings exist.** The post-closure application uses:
    - D1 binding `DB`
@@ -128,7 +128,7 @@ Phase 1 adds OIDC sign-in, D1 ownership tables, local sealed browser sessions, P
 
 3. Confirm `/auth/account` loads and shows your user id, namespace list, repositories, and PAT management UI.
 
-4. On first sign-in, git-on-cloudflare attempts to claim a namespace from `preferred_username`. If the claim succeeds, it enqueues legacy backfill for repos whose old owner slug matches that namespace.
+4. On first sign-in, git-on-cloudflare prefills a namespace from `preferred_username` (or the email local-part). Accept or edit it on `/auth/account` to create the namespace and membership. Nothing is claimed without that confirmation.
 
 5. Watch Workers logs for successful OIDC and backfill events:
    - `oidc:callback-success`
@@ -139,7 +139,7 @@ Phase 1 adds OIDC sign-in, D1 ownership tables, local sealed browser sessions, P
 
 - [ ] `GET /auth` redirects signed-in users to `/auth/account`
 - [ ] A row exists in D1 `users` for your OIDC `sub`
-- [ ] A namespace row exists for your expected owner slug
+- [ ] A namespace row exists for your expected owner slug (after confirming the claim form)
 - [ ] Your user has a `namespace_memberships` row for that namespace
 - [ ] Existing legacy repos for that owner appear as D1 `repositories` rows
 - [ ] `repositories.do_name` for imported repos is `<legacy-owner>/<repo>`
@@ -150,11 +150,14 @@ Phase 1 adds OIDC sign-in, D1 ownership tables, local sealed browser sessions, P
 
 ### Phase 1 Recovery
 
-If automatic namespace claim does not happen:
+If a namespace is not created after sign-in:
 
-- Confirm your provider emits `preferred_username`.
-- Confirm the value passes `src/shared/slugs.ts` policy and is not reserved (`auth`, `api`, `_cache`, and similar route-owned names are rejected).
-- If your provider cannot emit `preferred_username`, manually seed D1 `users`, `namespaces`, `namespace_memberships`, and `repositories` rows, then write `ROUTES` entries for public repos or proceed to phase 2 and rely on authenticated D1 fallback.
+- Namespaces are created only when you confirm the form at `/auth/account`. Open that page and accept or edit the prefilled name.
+- Check the `oidc:callback-success` log entry: `suggestedNamespaceSlug` is non-null when a name could be derived.
+- Confirm your provider emits `preferred_username` or `email`. Providers such as Google omit `preferred_username`, so the email local-part is used as a fallback suggestion.
+- Confirm the value normalizes to a claimable slug under `src/shared/slugs.ts`; reserved names (`auth`, `api`, `_cache`, ...) are skipped and numeric suffixes are tried for collisions.
+- If the suggestion is blank (for example an old session), just type the name you want. The form accepts any valid slug.
+- If every candidate is taken, the form still works: pick a unique name. Manual D1 seeding is not required.
 
 If backfill stalls:
 
@@ -293,7 +296,7 @@ The code uses `openid-client` and should work with a standard OIDC provider. The
 - Token endpoint returns a signed ID token
 - ID token validates for the configured client id audience
 - ID token includes stable `sub`
-- ID token should include `preferred_username` if you want first-login namespace claim
+- ID token should include `preferred_username` if you want a prefilled namespace suggestion
 
 If using Auth0, Keycloak, Dex, Zitadel, Google Workspace, or another provider, map their user handle claim into `preferred_username` if possible. Keep it stable and slug-safe. Do not use email addresses as namespace slugs unless you intentionally transform them into the repository slug policy.
 

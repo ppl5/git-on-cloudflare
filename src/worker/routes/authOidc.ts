@@ -1,10 +1,4 @@
-import { validateSlugForRoute } from "@/shared/slugs";
-import {
-  claimNamespace,
-  findUserByTesseraSub,
-  insertMembershipIfMissing,
-  insertUserIfNew,
-} from "@/worker/db/d1/dal";
+import { findUserByTesseraSub, insertUserIfNew, listNamespacesForUser } from "@/worker/db/d1/dal";
 import {
   clearOidcTransactionCookie,
   getOidcTransactionCookie,
@@ -24,11 +18,14 @@ import {
   loadOidcConfig,
   verifyIdTokenClaims,
 } from "@/worker/auth/oidc";
+import {
+  namespaceClaimCandidates,
+  suggestAvailableNamespaceSlug,
+} from "@/worker/auth/namespaceClaim";
 import { sameOriginViolation } from "@/worker/auth/origin";
 import {
   createSessionForUser,
   endSession,
-  generateNamespaceId,
   generateUserId,
   loadSessionConfig,
   loadViewer,
@@ -183,11 +180,15 @@ export function registerAuthOidcRoutes(router: AppRouter) {
       return errorRedirect(c, "session_create_failed");
     }
 
-    // First-login race-safe write model:
+    // Race-safe write model:
     //   1. Insert user; ON CONFLICT means existing row.
-    //   2. If new + valid pref-name, attempt namespace claim; can lose race.
-    //   3. If claim won, create membership.
-    //   4. Always create a sealed local session cookie.
+    //   2. If the account has no namespace yet, derive a claim suggestion
+    //      (`preferred_username`, then the email local-part). Nothing is
+    //      claimed here: the account page shows the suggestion in an
+    //      editable form and the user confirms it. This keeps the first
+    //      sign-in a deliberate choice and still recovers accounts that
+    //      previously had no naming claim.
+    //   3. Always create a sealed local session cookie.
     //
     // These writes stay sequential because each branch depends on prior
     // results. Batching would either roll back the valid user insert on a
@@ -201,10 +202,8 @@ export function registerAuthOidcRoutes(router: AppRouter) {
       createdAt: now,
     });
     let userId: string;
-    let wasNewUser = false;
     if (inserted) {
       userId = inserted.id;
-      wasNewUser = true;
     } else {
       const existing = await findUserByTesseraSub(db, verified.verified.sub);
       if (!existing) {
@@ -215,31 +214,24 @@ export function registerAuthOidcRoutes(router: AppRouter) {
       userId = existing.id;
     }
 
-    let claimedNamespaceSlug: string | null = null;
-    if (wasNewUser && verified.verified.preferredUsername) {
-      const candidate = validateSlugForRoute(verified.verified.preferredUsername.toLowerCase());
-      if (candidate.ok) {
-        const claimed = await claimNamespace(db, {
-          id: generateNamespaceId(),
-          slug: candidate.slug,
-          createdBy: userId,
-          createdAt: now,
-        });
-        if (claimed) {
-          await insertMembershipIfMissing(db, {
-            namespaceId: claimed.id,
-            userId,
-            createdAt: now,
-          });
-          claimedNamespaceSlug = claimed.slug;
-        } else {
-          log.info("oidc:callback-namespace-taken", { slug: candidate.slug });
-        }
-      }
+    const existingNamespaces = await listNamespacesForUser(db, userId);
+    let suggestedNamespaceSlug: string | undefined;
+    if (existingNamespaces.length === 0) {
+      suggestedNamespaceSlug = await suggestAvailableNamespaceSlug(
+        db,
+        namespaceClaimCandidates(verified.verified)
+      );
+      log.info("oidc:callback-namespace-suggested", {
+        userId,
+        suggestedNamespaceSlug: suggestedNamespaceSlug ?? null,
+      });
     }
 
     try {
-      await createSessionForUser(c.env, c, userId, now);
+      // Keep the suggestion in the sealed session so the account page can
+      // prefill the claim form. Existing sessions without the hint still get
+      // an empty form, which is enough to recover.
+      await createSessionForUser(c.env, c, userId, now, suggestedNamespaceSlug);
     } catch (error) {
       log.error("oidc:callback-session-create-failed", { error: String(error) });
       clearOidcTransactionCookie(c);
@@ -247,7 +239,10 @@ export function registerAuthOidcRoutes(router: AppRouter) {
     }
     clearOidcTransactionCookie(c);
 
-    log.info("oidc:callback-success", { userId, claimedNamespaceSlug });
+    log.info("oidc:callback-success", {
+      userId,
+      suggestedNamespaceSlug: suggestedNamespaceSlug ?? null,
+    });
     return safeRedirect(c, "/auth/account");
   });
 

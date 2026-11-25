@@ -69,6 +69,18 @@ async function signInAndGetCookie(sub: string, preferredUsername: string): Promi
   expect(res.status).toBe(302);
   const token = extractSessionToken(res.headers.get("set-cookie"));
   expect(token).toBeTruthy();
+  // Sign-in only prefills the claim form. Confirm the suggested namespace so
+  // each signed-in user has one to scope PATs against.
+  const claim = await workerExports.default.fetch("https://example.com/auth/api/namespaces", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: "https://example.com",
+      Cookie: sessionCookieHeader(token!),
+    },
+    body: JSON.stringify({ slug: preferredUsername }),
+  });
+  expect(claim.status).toBe(201);
   return token!;
 }
 
