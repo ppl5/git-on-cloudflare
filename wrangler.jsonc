@@ -86,7 +86,7 @@
     "LOG_LEVEL": "info",
     // tessera OIDC issuer (production). Override via .dev.vars for local dev.
     // Client id and secret are runtime concerns and live in .dev.vars / `wrangler secret put`.
-    "TESSERA_OIDC_ISSUER": "https://google.com",
+    "TESSERA_OIDC_ISSUER": "https://accounts.google.com",
     "TESSERA_OIDC_CLIENT_ID": "770314699655-eoa5mecsipemdpsdiq0g452lovf366o0.apps.googleusercontent.com"
   }
 }
